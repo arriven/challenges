@@ -1,0 +1,16 @@
+[package]
+name = "mine"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[features]
+default = []
+naive = []
+cmp = []
+
+[dependencies]
+anyhow = "1.0.68"
+num = { version = "0.4.0", features = ["num-bigint"] }
+sorted-vec = "0.8.2"
