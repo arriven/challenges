@@ -3,6 +3,9 @@ services:
     container_name: app
     restart: always
     build: ./app
+    depends_on:
+      - elasticsearch
+      - mongodb
     environment:
       - MONGO_ADDR=mongodb://admin:admin@mongodb:27017
       - ES_ADDR=http://elasticsearch:9200
@@ -10,6 +13,7 @@ services:
       - projectr_nw
     ports:
       - "5000:5000"
+      - 9091:9090 # app port
 
   mongodb:
     image: mongo
@@ -38,6 +42,19 @@ services:
     volumes:
       - es_data:/usr/share/elasticsearch/data
 
+  elasticsearch_exporter:
+    image: quay.io/prometheuscommunity/elasticsearch-exporter:latest
+    container_name: elasticsearch_exporter
+    depends_on:
+      - elasticsearch
+    command:
+      - "--es.uri=http://elasticsearch:9200"
+    networks:
+      - projectr_nw
+    ports:
+      - 9114:9114
+    restart: always
+
   nginx:
     image: nginx:stable
     restart: always
@@ -57,6 +74,9 @@ services:
     user: root
     entrypoint: "telegraf"
     restart: always
+    depends_on:
+      - elasticsearch
+      - mongodb
     networks:
       - projectr_nw
     volumes:

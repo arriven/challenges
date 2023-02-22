@@ -19,6 +19,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tracing_subscriber::{filter::Targets, layer::SubscriberExt, util::SubscriberInitExt};
 
+use prometheus_exporter::{
+    self,
+    prometheus::Counter,
+    prometheus::register_counter,
+};
+
 #[derive(Parser)]
 struct Cli {
     #[arg(default_value = "0.0.0.0:5000", env = "LISTEN_ADDR")]
@@ -27,6 +33,8 @@ struct Cli {
     mongo_addr: String,
     #[arg(default_value = "http://localhost:9200", env = "ES_ADDR")]
     es_addr: String,
+    #[arg(default_value = "0.0.0.0:9090", env = "PROM_LISTEN_ADDR")]
+    prom_addr: String,
 }
 
 #[tokio::main]
@@ -43,11 +51,25 @@ async fn main() -> anyhow::Result<()> {
     let client_options = ClientOptions::parse(&args.mongo_addr).await?;
     let mongo_client = Client::with_options(client_options)?;
     let mongo_db = mongo_client.database("mydb");
+    
+    let binding = args.prom_addr.parse().unwrap();
+    prometheus_exporter::start(binding).unwrap();
+    
+    let es_requests = register_counter!("app_requests_es", "requests").unwrap();
+    let mongo_requests = register_counter!("app_requests_mongo", "requests").unwrap();
+    let es_failures = register_counter!("app_failures_es", "requests").unwrap();
+    let mongo_failures = register_counter!("app_failures_mongo", "requests").unwrap();
+    let metrics = Metrics {
+        es_requests,
+        mongo_requests,
+        es_failures,
+        mongo_failures,
+    };
 
     let transport = Transport::single_node(&args.es_addr)?;
     let es_client = Elasticsearch::new(transport);
 
-    let state = Arc::new((mongo_db, es_client));
+    let state = Arc::new((mongo_db, es_client, metrics));
     let app = Router::new()
         .route("/", post(handler))
         .with_state(state);
@@ -56,6 +78,13 @@ async fn main() -> anyhow::Result<()> {
         .serve(app.into_make_service())
         .await?;
     Ok(())
+}
+
+struct Metrics {
+    es_requests: Counter,
+    mongo_requests: Counter,
+    es_failures: Counter,
+    mongo_failures: Counter,
 }
 
 #[derive(Deserialize)]
@@ -71,29 +100,38 @@ struct Response {
 }
 
 async fn handler(
-    State(state): State<Arc<(Database, Elasticsearch)>>,
+    State(state): State<Arc<(Database, Elasticsearch, Metrics)>>,
     Json(payload): Json<Request>,
 ) -> Result<Json<Response>, StatusCode> {
     Ok(Json(handler_internal(&state, payload).await?))
 }
 
 async fn handler_internal(
-    (mongo_db, es_client): &(Database, Elasticsearch),
+    (mongo_db, es_client, Metrics {
+        es_requests,
+        mongo_requests,
+        es_failures,
+        mongo_failures,
+    }): &(Database, Elasticsearch, Metrics),
     Request { key, value, db }: Request,
 ) -> Result<Response, StatusCode> {
+    tracing::debug!("trying to serve {db}");
     match db.as_ref() {
         "mongo" => {
+            mongo_requests.inc();
             let collection = mongo_db.collection::<Document>("kv");
             collection
                 .insert_one(doc! { "key" : key.clone(), "value": value}, None)
                 .await
                 .map_err(|e| {
                     tracing::error!("failed to write to storage: {:?}", e);
+                    mongo_failures.inc();
                     StatusCode::INTERNAL_SERVER_ERROR
                 })?;
             let filter = doc! { "key": key };
             let cursor = collection.find(filter, None).await.map_err(|e| {
                 tracing::error!("failed to find in storage: {:?}", e);
+                mongo_failures.inc();
                 StatusCode::INTERNAL_SERVER_ERROR
             })?;
             let values: Vec<_> = cursor
@@ -103,11 +141,13 @@ async fn handler_internal(
                 .await
                 .map_err(|e| {
                     tracing::error!("failed to read from storage: {:?}", e);
+                    mongo_failures.inc();
                     StatusCode::INTERNAL_SERVER_ERROR
                 })?;
             Ok(Response { values })
         }
         "elastic" => {
+            es_requests.inc();
             es_client
                 .create(CreateParts::IndexId("kv", &key))
                 .body(json!({
@@ -118,6 +158,7 @@ async fn handler_internal(
                 .await
                 .map_err(|e| {
                     tracing::error!("failed to write to storage: {:?}", e);
+                    es_failures.inc();
                     StatusCode::INTERNAL_SERVER_ERROR
                 })?;
 
@@ -135,12 +176,14 @@ async fn handler_internal(
                 .send()
                 .await
                 .map_err(|e| {
-                    tracing::error!("failed to write to storage: {:?}", e);
+                    tracing::error!("failed to search in storage: {:?}", e);
+                    es_failures.inc();
                     StatusCode::INTERNAL_SERVER_ERROR
                 })?;
 
             let response_body = response.json::<Value>().await.map_err(|e| {
-                tracing::error!("failed to write to storage: {:?}", e);
+                tracing::error!("failed to read from storage: {:?}", e);
+                es_failures.inc();
                 StatusCode::INTERNAL_SERVER_ERROR
             })?;
             let values = response_body["hits"]["hits"]
