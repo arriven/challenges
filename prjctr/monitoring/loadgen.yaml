@@ -1,0 +1,15 @@
+jobs:
+  - type: http
+    args:
+      dynamic: true
+      request:
+        method: POST
+        path: http://localhost:8080/
+        body: '{ "key": {{random_alphanum 10}}, "value": {{random_alphanum 10}}, "db":"mongo"}'
+  - type: http
+    args:
+      dynamic: true
+      request:
+        method: POST
+        path: http://localhost:8080/
+        body: '{ "key": {{random_alphanum 10}}, "value": {{random_alphanum 10}}, "db":"elastic"}'
